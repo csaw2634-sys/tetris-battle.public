@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Do+Hyeon&family=Gothic+A1:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
 :root{
   --bg:#E8EBF6; --surface:#FFFFFF; --line:#C9CEE6; --text:#1D2042; --muted:#5B6190;
@@ -32,7 +33,7 @@
   --well:#10132E; --well-grid:#1B1F45; color-scheme:dark;
 }
 *,*::before,*::after{box-sizing:inherit}
-html,body{margin:0;height:100%}
+html,body{margin:0;min-height:100%}
 body{background:var(--bg);color:var(--text);font-family:var(--body);font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}
 [hidden]{display:none !important}
 button,input{font:inherit;color:inherit}
@@ -48,8 +49,7 @@ button,input{font:inherit;color:inherit}
 .row{display:flex;gap:.6rem;flex-wrap:wrap;justify-content:center}
 
 /* Home */
-.screen{min-height:100%;padding:1.5rem 1rem}
-.note{color:var(--muted);font-size:.92rem;margin:.8rem 0 0;min-height:1.4em}
+.screen{min-height:100vh;padding:1.5rem 1rem}
 #home,#room{display:flex;justify-content:center;align-items:center}
 .homeInner,.roomInner{width:100%;max-width:26rem;text-align:center}
 .title{font-family:var(--display);font-weight:400;font-size:clamp(3.2rem,12vw,5rem);line-height:1;margin:0 0 .6rem;letter-spacing:-.01em}
@@ -152,8 +152,7 @@ kbd{font-family:var(--body);font-weight:800;background:var(--bg);border:1px soli
       </div>
       <button id="btnSolo" class="btn ghost">혼자 연습하기</button>
     </div>
-    <p id="netNote" class="note" role="status"></p>
-    <p id="homeMsg" class="msg" role="alert"></p>
+    <p id="homeMsg" class="msg" role="status"></p>
     <details class="keys">
       <summary>조작법</summary>
       <table>
@@ -173,9 +172,10 @@ kbd{font-family:var(--body);font-weight:800;background:var(--bg);border:1px soli
     <p class="roomLabel">방 코드</p>
     <div id="codeTiles" class="codeTiles"></div>
     <div class="row">
-      <button id="btnCopyCode" class="btn">코드 복사</button>
+      <button id="btnCopyLink" class="btn">초대 링크 복사</button>
+      <button id="btnCopyCode" class="btn ghost">코드 복사</button>
     </div>
-    <p class="hint" id="roomHint">친구에게 이 페이지 링크와 방 코드를 보내 주세요. 친구도 claude.ai에 로그인해 있어야 해요.</p>
+    <p class="hint" id="roomHint">친구는 이 게임 페이지를 열고 방 코드를 입력하면 들어와요.</p>
     <h2>참가자 <span id="count"></span></h2>
     <ul id="plist"></ul>
     <button id="btnStart" class="btn primary">게임 시작</button>
@@ -447,22 +447,18 @@ class Game {
 }
 
 /* ---------- 상태 ---------- */
-let room = null, groom = null, isHost = false, solo = false, myId = null, myName = '', roomCode = '';
-let hostPeer = null, hostMissingSince = 0, unsubPeers = null;
-let roster = null, running = false, deathOrder = [], curGid = null, hostGame = null;
+let peer = null, isHost = false, solo = false, myId = null, myName = '', roomCode = '', hostConn = null, leaving = false;
+const conns = new Map();
+let players = [], roster = null, running = false, deathOrder = [];
 let game = null, phase = 'home', countdownEnd = 0, lastStateKey = '', lastStateAt = 0;
 const opps = new Map();
-let atkTotals = new Map();
 let cell = 28, side = 20, oppCell = 12;
 
 /* ---------- 화면 ---------- */
 function show(id){ for (const s of ['home','room','play']) $('#'+s).hidden = s !== id; }
 function homeMsg(t){ $('#homeMsg').textContent = t || ''; }
 function num(v, max){ v = Math.floor(Number(v)); return Number.isFinite(v) ? Math.max(0, Math.min(max, v)) : 0; }
-function cleanName(s){
-  s = String(s || '').replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '').replace(/\s+/g, ' ').trim().slice(0, 12);
-  return s || '이름 없음';
-}
+function cleanName(s){ s = String(s || '').replace(/\s+/g, ' ').trim().slice(0, 12); return s || '이름 없음'; }
 function store(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
 function load(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
 
@@ -473,171 +469,186 @@ $('#code').addEventListener('input', e => { e.target.value = e.target.value.toUp
 $('#code').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnJoin').click(); });
 
 function getName(){ myName = cleanName($('#name').value); $('#name').value = myName; store('blokvs-name', myName); return myName; }
-function makeCode(){ let s = ''; for (let i=0;i<5;i++) s += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; return s; }
-
-/* ---------- 실시간 연결 (claude.ai room) ---------- */
-function setNetButtons(on){ $('#btnCreate').disabled = !on; $('#btnJoin').disabled = !on; }
-setNetButtons(false);
-$('#netNote').textContent = '실시간 연결을 준비하는 중이에요…';
-const roomP = (window.claude && typeof window.claude.use === 'function')
-  ? window.claude.use('room').catch(() => null) : Promise.resolve(null);
-roomP.then(r => {
-  room = r; setNetButtons(!!r);
-  $('#netNote').textContent = r ? '' : '여기서는 실시간 연결을 쓸 수 없어요. claude.ai에 로그인한 상태로 이 페이지를 열어 주세요. 혼자 연습은 할 수 있어요.';
-});
-
-function roomName(code){ return 'blokvs-' + code.toLowerCase(); }
-function viewerPeers(){ return groom ? groom.peers().filter(p => p.kind === 'viewer') : []; }
-
-async function enterRoom(code, asHost){
-  getName(); homeMsg('');
-  $('#netNote').textContent = asHost ? '방을 만드는 중이에요…' : '방에 들어가는 중이에요…';
-  let g;
-  try { g = await room.join(roomName(code)); }
-  catch(e){
-    $('#netNote').textContent = '';
-    homeMsg(e && e.code === 'limit_reached' ? '지금은 방을 더 열 수 없어요. 잠시 뒤 다시 시도해 주세요.' : '방에 연결하지 못했어요. 잠시 뒤 다시 시도해 주세요.');
-    return false;
-  }
-  groom = g; roomCode = code; isHost = asHost; solo = false; myId = null;
-  hostPeer = null; hostMissingSince = 0; curGid = null; roster = null; running = false; hostGame = null;
-  try {
-    await g.presence({ n: myName, h: asHost ? true : null, g: null, pg: null, b: null, inc: null, l: null, s: null, d: null, a: null });
-  } catch(e){}
-  unsubPeers = g.onPeers(onRoomPeers, () => {
-    if (groom === g){ leaveRoom(); homeMsg('실시간 연결이 끊겼어요. 다시 들어와 주세요.'); }
-  });
+function peerReady(){
+  if (typeof Peer === 'undefined'){ homeMsg('연결 라이브러리를 불러오지 못했어요. 인터넷 연결을 확인해 주세요. 혼자 연습은 할 수 있어요.'); return false; }
   return true;
 }
-async function createRoom(){
-  if (!room) return;
-  if (await enterRoom(makeCode(), true)){
-    $('#netNote').textContent = ''; phase = 'room'; show('room'); renderRoom();
-  }
+function peerErrorText(err){
+  const t = err && err.type;
+  if (t === 'peer-unavailable') return '그 코드의 방을 찾지 못했어요. 코드를 다시 확인해 주세요.';
+  if (t === 'browser-incompatible') return '이 브라우저는 실시간 연결을 지원하지 않아요. 크롬이나 엣지에서 열어 주세요.';
+  if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') return '연결 서버에 닿지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.';
+  return '연결 오류가 생겼어요 (' + (t || '알 수 없음') + '). 다시 시도해 주세요.';
 }
-async function joinRoom(){
-  if (!room) return;
-  const code = $('#code').value.trim().toUpperCase();
-  if (!/^[A-Z0-9]{5}$/.test(code)){ homeMsg('방 코드 5자리를 입력해 주세요.'); return; }
-  if (await enterRoom(code, false)){
-    phase = 'joining';
-    $('#netNote').textContent = '방장을 찾는 중이에요…';
-    onRoomPeers();
-    setTimeout(() => {
-      if (phase === 'joining' && groom){ leaveRoom(); homeMsg('그 코드의 방을 찾지 못했어요. 코드를 다시 확인해 주세요.'); }
-    }, 7000);
-  }
-}
-function leaveRoom(){
-  const g = groom; groom = null;
-  if (unsubPeers){ try { unsubPeers(); } catch(e){} unsubPeers = null; }
-  if (g) g.leave().catch(() => {});
-  isHost = false; solo = false; roster = null; running = false; game = null; curGid = null; hostGame = null;
-  opps.clear(); atkTotals = new Map();
-  phase = 'home'; $('#results').hidden = true; $('#netNote').textContent = ''; show('home');
-}
+function makeCode(){ let s = ''; for (let i=0;i<5;i++) s += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; return s; }
 
-function onRoomPeers(){
-  if (!groom) return;
-  const ps = viewerPeers();
-  const me = ps.find(p => p.sameTab); if (me) myId = me.peer;
-  if (!isHost){
-    const host = ps.find(p => !p.sameTab && p.presence && p.presence.h === true);
-    if (host){
-      hostPeer = host.peer; hostMissingSince = 0;
-      if (phase === 'joining'){ $('#netNote').textContent = ''; homeMsg(''); phase = 'room'; show('room'); }
-      syncHostGame(host.presence.g);
-    } else if (hostPeer && !hostMissingSince) hostMissingSince = Date.now();
-  }
-  if (roster && curGid){
-    for (const p of ps){
-      const o = opps.get(p.peer); if (!o) continue;
-      o.missingSince = 0;
-      const pr = p.presence || {};
-      if (pr.pg !== curGid) continue;
-      if (typeof pr.b === 'string' && pr.b.length === COLS*ROWS && pr.b !== o.b){ o.b = pr.b; o.dirty = true; }
-      const inc = num(pr.inc, 60), l = num(pr.l, 99999), s = num(pr.s, 99999);
-      if (inc !== o.inc || l !== o.lines || s !== o.sent){ o.inc = inc; o.lines = l; o.sent = s; o.dirty = true; }
-      if (Array.isArray(pr.a) && myId){
-        for (const e of pr.a){
-          if (!Array.isArray(e) || e[0] !== myId) continue;
-          const tot = num(e[1], 1e6);
-          if (tot > o.atkSeen){
-            const n = Math.min(20, tot - o.atkSeen); o.atkSeen = tot;
-            if (game && !game.dead && phase === 'playing'){ game.receiveAttack(n, performance.now()); feed(o.name + '님이 ' + n + '줄 보냄', 'in'); }
-          }
-        }
-      }
-      if (pr.d === true && !o.dead) markOppDead(o, false);
-    }
-  }
-  if (phase === 'room' || phase === 'waiting') renderRoom();
+/* ---------- 호스트 ---------- */
+function createRoom(attempt = 0){
+  if (!peerReady()) return;
+  getName(); homeMsg('방을 만드는 중이에요…');
+  roomCode = makeCode();
+  const p = new Peer(PREFIX + roomCode, { debug: 1 });
+  peer = p;
+  p.on('open', id => {
+    if (peer !== p) return;
+    myId = id; isHost = true; solo = false; players = [{ id, name: myName }];
+    homeMsg(''); phase = 'room'; show('room'); renderRoom();
+  });
+  p.on('connection', onHostConnection);
+  p.on('disconnected', () => { if (!leaving && peer === p && !p.destroyed){ try { p.reconnect(); } catch(e){} } });
+  p.on('error', err => {
+    if (peer !== p) return;
+    if (err.type === 'unavailable-id' && attempt < 4){ p.destroy(); peer = null; createRoom(attempt + 1); return; }
+    if (phase === 'home'){ homeMsg(peerErrorText(err)); p.destroy(); peer = null; }
+  });
 }
-function syncHostGame(g){
-  if (!g || typeof g !== 'object' || typeof g.id !== 'string' || !Array.isArray(g.r)){ running = false; return; }
-  const over = Array.isArray(g.o);
-  running = !over;
-  if (g.id !== curGid){
-    curGid = g.id;
-    if (!over) beginGame({ id: g.id, seed: num(g.seed, 4294967295), r: g.r.slice(0, MAX_PLAYERS) });
-    else roster = null;
-  } else if (over){
-    if (phase === 'playing' || phase === 'countdown') onOver({ ranking: g.o.map(String) });
-    else if (phase === 'waiting') phase = 'room';
-  }
+function onHostConnection(conn){
+  conn.on('open', () => {
+    if (players.length >= MAX_PLAYERS){ try { conn.send({ t:'full' }); } catch(e){} setTimeout(() => conn.close(), 400); return; }
+    conns.set(conn.peer, conn);
+    players.push({ id: conn.peer, name: cleanName(conn.metadata && conn.metadata.name) });
+    broadcastLobby();
+    if (running){ try { conn.send({ t:'wait' }); } catch(e){} }
+  });
+  conn.on('data', d => hostReceive(conn.peer, d));
+  conn.on('close', () => hostDrop(conn.peer));
+  conn.on('error', () => hostDrop(conn.peer));
 }
-setInterval(() => {
-  if (!groom) return;
-  const now = Date.now(), present = new Set(viewerPeers().map(p => p.peer));
-  if (!isHost && hostMissingSince && now - hostMissingSince > 4000){
-    leaveRoom(); homeMsg('방장과 연결이 끊겼어요. 방이 닫혔을 수 있어요.'); return;
-  }
-  if (roster && (phase === 'playing' || phase === 'countdown')){
-    for (const o of opps.values()){
-      if (o.dead) continue;
-      if (present.has(o.id)){ o.missingSince = 0; continue; }
-      if (!o.missingSince) o.missingSince = now;
-      else if (now - o.missingSince > 4000) markOppDead(o, true);
-    }
-  }
-}, 500);
-function markOppDead(o, left){
-  if (o.dead) return;
-  o.dead = true; o.left = left; o.dirty = true;
-  feed(o.name + (left ? '님이 나갔어요' : '님 KO'), '');
-  updateOppTag(o);
-  if (isHost) hostOnDead(o.id);
+function broadcast(msg, except){
+  for (const [id, c] of conns){ if (id !== except && c.open){ try { c.send(msg); } catch(e){} } }
 }
-
-/* ---------- 방장 ---------- */
+function broadcastLobby(){
+  broadcast({ t:'lobby', players, running });
+  if (phase === 'room') renderRoom();
+}
+function hostDrop(id){
+  if (!conns.has(id)) return;
+  conns.delete(id);
+  players = players.filter(p => p.id !== id);
+  if (running && roster && roster.some(p => p.id === id)){
+    const msg = { t:'left', from:id };
+    broadcast(msg); handleGameMsg(msg); hostOnDead(id);
+  }
+  broadcastLobby();
+}
+function hostReceive(from, d){
+  if (!d || typeof d !== 'object') return;
+  if (!['state','attack','dead'].includes(d.t)) return;
+  if (!running || !roster || !roster.some(p => p.id === from)) return;
+  d.from = from;
+  broadcast(d, from);
+  handleGameMsg(d);
+  if (d.t === 'dead') hostOnDead(from);
+}
 function hostStart(){
   if (!isHost || running) return;
-  let list;
-  if (solo) list = [['local', myName]];
-  else {
-    if (!myId){ $('#roomStatus').textContent = '연결을 확인하는 중이에요. 잠시 뒤 다시 눌러 주세요.'; return; }
-    const others = viewerPeers().filter(p => !p.sameTab && p.presence && typeof p.presence.n === 'string' && p.presence.h !== true);
-    list = [[myId, myName], ...others.map(p => [p.peer, cleanName(p.presence.n)])].slice(0, MAX_PLAYERS);
-  }
-  hostGame = { id: Math.random().toString(36).slice(2, 10), seed: (Math.random() * 4294967296) >>> 0, r: list, o: null };
+  const seed = (Math.random() * 4294967296) >>> 0;
+  roster = players.map(p => ({ id: p.id, name: p.name }));
   deathOrder = []; running = true;
-  if (!solo && groom) groom.presence({ g: hostGame }).catch(() => {});
-  beginGame(hostGame);
+  const msg = { t:'start', seed, roster };
+  broadcast(msg);
+  broadcastLobby();
+  beginGame(msg);
 }
 function hostOnDead(id){
-  if (!running || !roster || deathOrder.includes(id)) return;
+  if (!running || deathOrder.includes(id)) return;
   deathOrder.push(id);
   const alive = roster.filter(p => !deathOrder.includes(p.id));
   if ((roster.length === 1 && alive.length === 0) || (roster.length > 1 && alive.length <= 1)){
     running = false;
-    const ranking = [...alive.map(p => p.id), ...deathOrder.slice().reverse()];
-    if (!solo && hostGame){ hostGame = Object.assign({}, hostGame, { o: ranking }); if (groom) groom.presence({ g: hostGame }).catch(() => {}); }
-    onOver({ ranking });
+    const msg = { t:'over', ranking: [...alive.map(p => p.id), ...deathOrder.slice().reverse()] };
+    broadcast(msg); broadcastLobby();
+    onOver(msg);
   }
+}
+
+/* ---------- 참가자 ---------- */
+function joinRoom(){
+  if (!peerReady()) return;
+  const code = $('#code').value.trim().toUpperCase();
+  if (!/^[A-Z0-9]{5}$/.test(code)){ homeMsg('방 코드 5자리를 입력해 주세요.'); return; }
+  getName(); homeMsg('방에 들어가는 중이에요…');
+  roomCode = code;
+  const p = new Peer({ debug: 1 });
+  peer = p;
+  let joined = false;
+  const timer = setTimeout(() => {
+    if (!joined && peer === p){ homeMsg('방에 연결하지 못했어요. 코드와 인터넷 연결을 확인해 주세요.'); p.destroy(); peer = null; }
+  }, 15000);
+  p.on('open', id => {
+    if (peer !== p) return;
+    myId = id; isHost = false; solo = false;
+    const conn = p.connect(PREFIX + code, { metadata: { name: myName }, serialization: 'json', reliable: true });
+    hostConn = conn;
+    conn.on('open', () => { joined = true; clearTimeout(timer); homeMsg(''); phase = 'room'; show('room'); renderRoom(); });
+    conn.on('data', clientReceive);
+    conn.on('close', () => hostLost());
+  });
+  p.on('error', err => {
+    if (peer !== p) return;
+    if (!joined){ clearTimeout(timer); homeMsg(peerErrorText(err)); p.destroy(); peer = null; }
+  });
+}
+function hostLost(){
+  if (leaving || !peer) return;
+  leave();
+  homeMsg('호스트와 연결이 끊겼어요. 방이 닫혔을 수 있어요.');
+}
+function clientReceive(d){
+  if (!d || typeof d !== 'object') return;
+  switch (d.t){
+    case 'lobby':
+      if (Array.isArray(d.players)) players = d.players.slice(0, MAX_PLAYERS).map(p => ({ id: String(p.id), name: cleanName(p.name) }));
+      running = !!d.running;
+      if (phase === 'room' || phase === 'waiting') renderRoom();
+      break;
+    case 'wait': phase = 'waiting'; renderRoom(); break;
+    case 'full': leave(); homeMsg('방이 꽉 찼어요 (최대 ' + MAX_PLAYERS + '명).'); break;
+    case 'start':
+      if (Array.isArray(d.roster)) beginGame({ seed: num(d.seed, 4294967295), roster: d.roster.map(p => ({ id: String(p.id), name: cleanName(p.name) })) });
+      break;
+    case 'over': if (Array.isArray(d.ranking)) onOver({ ranking: d.ranking.map(String) }); break;
+    case 'state': case 'attack': case 'dead': case 'left':
+      handleGameMsg(d); break;
+  }
+}
+
+/* ---------- 공용 ---------- */
+function sendGame(msg){
+  msg.from = myId;
+  if (solo) return;
+  if (isHost){ broadcast(msg); if (msg.t === 'dead') hostOnDead(myId); }
+  else if (hostConn && hostConn.open){ try { hostConn.send(msg); } catch(e){} }
+}
+function handleGameMsg(d){
+  if (!roster || d.from === myId) return;
+  const o = opps.get(d.from); if (!o) return;
+  if (d.t === 'state'){
+    if (typeof d.b === 'string' && d.b.length === COLS*ROWS) o.b = d.b;
+    o.inc = num(d.inc, 60); o.lines = num(d.l, 99999); o.sent = num(d.s, 99999); o.dirty = true;
+  } else if (d.t === 'attack'){
+    const n = num(d.n, 20);
+    if (d.to === myId && game && !game.dead && phase === 'playing' && n > 0){
+      game.receiveAttack(n, performance.now());
+      feed(o.name + '님이 ' + n + '줄 보냄', 'in');
+    }
+  } else if (d.t === 'dead' || d.t === 'left'){
+    if (!o.dead){ o.dead = true; feed(o.name + (d.t === 'left' ? '님이 나갔어요' : '님 KO'), ''); }
+    if (d.t === 'left') o.left = true;
+    o.dirty = true; updateOppTag(o);
+  }
+}
+function leave(){
+  leaving = true;
+  try { if (peer) peer.destroy(); } catch(e){}
+  peer = null; hostConn = null; conns.clear();
+  isHost = false; solo = false; players = []; roster = null; running = false; game = null; opps.clear();
+  phase = 'home'; $('#results').hidden = true; show('home');
+  leaving = false;
 }
 function startSolo(){
   getName(); homeMsg('');
-  solo = true; isHost = true; myId = 'local';
+  solo = true; isHost = true; myId = 'local'; players = [{ id:'local', name: myName }];
   hostStart();
 }
 
@@ -650,23 +661,22 @@ function renderRoom(){
     s.style.background = COLORS[TILE_ORDER[i % TILE_ORDER.length]]; s.setAttribute('aria-hidden','true');
     tiles.appendChild(s);
   });
-  const ps = viewerPeers().filter(p => p.presence && typeof p.presence.n === 'string')
-    .sort((a, b) => (b.presence.h === true) - (a.presence.h === true));
-  $('#count').textContent = ps.length + ' / ' + MAX_PLAYERS;
+  $('#btnCopyLink').hidden = !/^https?:/.test(location.protocol);
+  $('#count').textContent = players.length + ' / ' + MAX_PLAYERS;
   const ul = $('#plist'); ul.textContent = '';
-  for (const p of ps){
+  const hostId = PREFIX + roomCode;
+  for (const p of players){
     const li = document.createElement('li');
-    const n = document.createElement('span'); n.textContent = cleanName(p.presence.n);
+    const n = document.createElement('span'); n.textContent = p.name;
     const t = document.createElement('span'); t.className = 'tag';
-    t.textContent = [p.presence.h === true ? '방장' : '', p.sameTab ? '나' : ''].filter(Boolean).join(', ');
+    t.textContent = [p.id === hostId ? '방장' : '', p.id === myId ? '나' : ''].filter(Boolean).join(', ');
     li.append(n, t); ul.appendChild(li);
   }
-  if (!ps.length){ const li = document.createElement('li'); li.textContent = '참가자 목록을 불러오는 중이에요…'; ul.appendChild(li); }
   const st = $('#roomStatus'), b = $('#btnStart');
   if (isHost){
     b.hidden = false; b.disabled = running;
-    b.textContent = ps.length <= 1 ? '혼자 시작하기' : '게임 시작';
-    st.textContent = running ? '게임이 진행 중이에요.' : (ps.length <= 1 ? '친구가 들어오기를 기다리거나 혼자 먼저 해볼 수 있어요.' : '');
+    b.textContent = players.length === 1 ? '혼자 시작하기' : '게임 시작';
+    st.textContent = running ? '게임이 진행 중이에요.' : (players.length === 1 ? '친구가 들어오기를 기다리거나 혼자 먼저 해볼 수 있어요.' : '');
   } else {
     b.hidden = true;
     st.textContent = (phase === 'waiting' || running) ? '진행 중인 판이 끝나면 다음 판부터 함께해요.' : '방장이 게임을 시작하면 바로 시작돼요.';
@@ -680,11 +690,10 @@ async function copy(text, btn){
 }
 
 /* ---------- 게임 진행 ---------- */
-function beginGame(g){
-  curGid = g.id;
-  roster = g.r.map(e => ({ id: String(e[0]), name: cleanName(e[1]) }));
+function beginGame(msg){
+  roster = msg.roster;
   if (!roster.some(p => p.id === myId)){ phase = 'waiting'; show('room'); renderRoom(); return; }
-  opps.clear(); atkTotals = new Map();
+  opps.clear();
   const box = $('#opps'); box.textContent = '';
   const others = roster.filter(p => p.id !== myId);
   oppCell = others.length <= 1 ? 16 : others.length <= 3 ? 12 : 9;
@@ -695,29 +704,28 @@ function beginGame(g){
     const tag = document.createElement('div'); tag.className = 'otag';
     const st = document.createElement('div'); st.className = 'os';
     card.append(nm, cv, tag, st); box.appendChild(card);
-    opps.set(p.id, { id:p.id, name:p.name, b:'.'.repeat(COLS*ROWS), inc:0, lines:0, sent:0, dead:false, left:false, place:0,
-      cv, ctx:null, tag, st, dirty:true, atkSeen:0, missingSince:0 });
+    const o = { id:p.id, name:p.name, b:'.'.repeat(COLS*ROWS), inc:0, lines:0, sent:0, dead:false, left:false, place:0, cv, ctx:null, tag, st, dirty:true };
+    opps.set(p.id, o);
   }
-  game = new Game(g.seed, { attack: onAttack, death: onMyDeath, label: showLabel });
+  game = new Game(msg.seed, { attack: onAttack, death: onMyDeath, label: showLabel });
   resetInput();
   $('#feed').textContent = ''; $('#action').textContent = ''; $('#results').hidden = true; $('#myKo').hidden = true;
   show('play'); resize();
   phase = 'countdown'; countdownEnd = performance.now() + 3000; lastStateKey = ''; lastStateAt = 0;
-  maybeSendState(performance.now(), true);
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
 }
 function onAttack(n){
   const targets = [...opps.values()].filter(o => !o.dead);
   if (!targets.length) return;
   const o = targets[Math.floor(Math.random() * targets.length)];
-  atkTotals.set(o.id, (atkTotals.get(o.id) || 0) + n);
-  lastStateAt = 0;
+  sendGame({ t:'attack', to:o.id, n });
   feed(o.name + '님에게 ' + n + '줄 보냄', 'out');
 }
 function onMyDeath(){
   maybeSendState(performance.now(), true);
   const ko = $('#myKo'); ko.textContent = 'KO'; ko.hidden = false;
-  if (isHost) hostOnDead(myId);
+  sendGame({ t:'dead' });
+  if (solo) hostOnDead(myId);
 }
 function showLabel(text){
   const el = $('#action'); el.textContent = text;
@@ -731,8 +739,7 @@ function feed(text, kind){
 function onOver(d){
   if (!game || !roster || !roster.some(p => p.id === myId)){ phase = 'room'; renderRoom(); return; }
   phase = 'over';
-  if (!game.endTime) game.endTime = performance.now();
-  maybeSendState(performance.now(), true);
+  if (game && !game.endTime) game.endTime = performance.now();
   const rank = d.ranking;
   rank.forEach((id, i) => { const o = opps.get(id); if (o){ o.place = i + 1; updateOppTag(o); o.dirty = true; } });
   const myIdx = rank.indexOf(myId);
@@ -761,14 +768,14 @@ function updateOppTag(o){
   o.tag.textContent = o.place ? (o.place + '위') : o.left ? '나감' : o.dead ? 'KO' : '';
 }
 function maybeSendState(now, force){
-  if (!game || solo || !groom) return;
+  if (!game || solo) return;
   if (!force && now - lastStateAt < 120) return;
   lastStateAt = now;
-  const st = { pg: curGid, b: game.snapshot(), inc: game.pending(), l: game.lines, s: game.sent, d: game.dead, a: [...atkTotals] };
-  const key = JSON.stringify(st);
+  const b = game.snapshot(), inc = game.pending();
+  const key = b + '|' + inc + '|' + game.lines + '|' + game.sent;
   if (!force && key === lastStateKey) return;
   lastStateKey = key;
-  groom.presence(st).catch(() => {});
+  sendGame({ t:'state', b, inc, l: game.lines, s: game.sent });
 }
 
 /* ---------- 입력 ---------- */
@@ -961,18 +968,20 @@ function frame(t){
 requestAnimationFrame(frame);
 
 /* ---------- 버튼 ---------- */
-$('#btnCreate').addEventListener('click', createRoom);
+$('#btnCreate').addEventListener('click', () => createRoom());
 $('#btnJoin').addEventListener('click', joinRoom);
 $('#btnSolo').addEventListener('click', startSolo);
 $('#btnStart').addEventListener('click', hostStart);
-$('#btnLeave').addEventListener('click', () => { leaveRoom(); homeMsg(''); });
+$('#btnLeave').addEventListener('click', () => { leave(); homeMsg(''); });
 $('#btnCopyCode').addEventListener('click', e => copy(roomCode, e.currentTarget));
+$('#btnCopyLink').addEventListener('click', e => copy(location.origin + location.pathname + '#' + roomCode, e.currentTarget));
 $('#btnAgain').addEventListener('click', () => { $('#results').hidden = true; hostStart(); });
 $('#btnToRoom').addEventListener('click', () => {
   $('#results').hidden = true;
-  if (solo){ leaveRoom(); return; }
+  if (solo){ leave(); return; }
   phase = 'room'; show('room'); renderRoom();
 });
+window.addEventListener('beforeunload', () => { leaving = true; try { if (peer) peer.destroy(); } catch(e){} });
 })();
 </script>
 </body>
